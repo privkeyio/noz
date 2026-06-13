@@ -48,11 +48,11 @@ pub fn main(init: std.process.Init) !void {
     } else if (std.mem.eql(u8, cmd, "event")) {
         try cmdEvent(arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "req")) {
-        try cmdReq(arena, out, rest);
+        try cmdReq(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "count")) {
         try cmdCount(arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "relay")) {
-        try cmdRelay(arena, out, rest);
+        try cmdRelay(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) {
         try out.writeAll(usage);
     } else {
@@ -114,11 +114,11 @@ fn cmdEvent(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
         } else if (std.mem.eql(u8, a, "-k")) {
             i += 1;
             const kv = next(args, i) orelse return missing(out, "-k");
-            kind = std.fmt.parseInt(i32, kv, 10) catch return out.print("invalid kind: {s}\n", .{kv});
+            kind = std.fmt.parseInt(i32, kv, 10) catch return invalid(out, "kind", kv);
         } else if (std.mem.eql(u8, a, "--ts")) {
             i += 1;
             const tv = next(args, i) orelse return missing(out, "--ts");
-            ts = std.fmt.parseInt(i64, tv, 10) catch return out.print("invalid timestamp: {s}\n", .{tv});
+            ts = std.fmt.parseInt(i64, tv, 10) catch return invalid(out, "timestamp", tv);
         } else if (std.mem.eql(u8, a, "-t")) {
             i += 1;
             const spec = next(args, i) orelse return missing(out, "-t");
@@ -240,7 +240,7 @@ fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Q
     };
 }
 
-fn cmdReq(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+fn cmdReq(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
     const q = (try parseQuery(arena, out, args)) orelse return;
 
     try nostr.init();
@@ -261,7 +261,7 @@ fn cmdReq(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
             // Extract the event object straight from the raw message text so
             // braces inside content cannot throw off the bounds.
             .event => {
-                try printEventObject(out, msg.raw);
+                try printEventObject(io, out, msg.raw);
                 seen += 1;
             },
             .eose, .closed => break,
@@ -316,30 +316,30 @@ fn tagFilterFromSpec(arena: Allocator, spec: []const u8) !nostr.FilterTagEntry {
     return .{ .letter = name[0], .values = values };
 }
 
-fn cmdRelay(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+fn cmdRelay(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
     const url = if (args.len >= 1) args[0] else return missing(out, "relay url");
     const doc = nostr.nip11.fetchDocument(arena, url) catch |e| {
         try out.print("failed to fetch relay info: {s}\n", .{@errorName(e)});
         return;
     };
-    try printSanitized(out, doc);
+    try printSanitized(io, out, doc);
 }
 
 // Extract and print the event object from a ["EVENT","sub",{...}] message. The
 // event object is the outermost {...}, so first-brace to last-brace is exact
 // even when the content contains braces.
-fn printEventObject(out: *Io.Writer, raw: []const u8) !void {
+fn printEventObject(io: Io, out: *Io.Writer, raw: []const u8) !void {
     const start = std.mem.indexOfScalar(u8, raw, '{') orelse return;
     const end = std.mem.lastIndexOfScalar(u8, raw, '}') orelse return;
     if (end < start) return;
-    try printSanitized(out, raw[start .. end + 1]);
+    try printSanitized(io, out, raw[start .. end + 1]);
 }
 
 // Print relay-supplied bytes followed by a newline. On a TTY, escape C0/C1
 // control characters (keeping normal whitespace) so a hostile relay cannot
 // inject terminal escape sequences.
-fn printSanitized(out: *Io.Writer, bytes: []const u8) !void {
-    if (std.posix.isatty(std.posix.STDOUT_FILENO)) {
+fn printSanitized(io: Io, out: *Io.Writer, bytes: []const u8) !void {
+    if (try Io.File.stdout().isTty(io)) {
         for (bytes) |c| {
             if (isControlByte(c)) {
                 try out.print("\\x{x:0>2}", .{c});
@@ -356,7 +356,7 @@ fn printSanitized(out: *Io.Writer, bytes: []const u8) !void {
 fn isControlByte(c: u8) bool {
     return switch (c) {
         '\n', '\t', '\r' => false,
-        else => c < 0x20 or (c >= 0x7f and c <= 0x9f),
+        else => c < 0x20 or c == 0x7f,
     };
 }
 
@@ -374,8 +374,12 @@ fn missingNull(out: *Io.Writer, what: []const u8) !?Query {
     return null;
 }
 
-fn invalidNull(out: *Io.Writer, what: []const u8, val: []const u8) !?Query {
+fn invalid(out: *Io.Writer, what: []const u8, val: []const u8) !void {
     try out.print("invalid {s}: {s}\n", .{ what, val });
+}
+
+fn invalidNull(out: *Io.Writer, what: []const u8, val: []const u8) !?Query {
+    try invalid(out, what, val);
     return null;
 }
 
