@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.2.tar.gz",
-            .hash = "nostr-0.3.2-JY6OcPiYDwCqpbCqr3dTI3IlRd2055ALPPUUmV0n3eCs",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/e1fc6ca85c664840a4483ab1de9bcbd6adee9b82.tar.gz",
+            .hash = "nostr-0.3.3-JY6OcH66DwAJbNf6WJ78_c3gmrdOsQdpBcDCX40_FGGW",
         },
     },
     .paths = .{
