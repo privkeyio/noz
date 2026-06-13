@@ -17,9 +17,9 @@ const usage =
     \\  relay <url>                  Print the NIP-11 relay information document
     \\  sync <src> <dst> [filters..] NIP-77 reconcile src's events into dst
     \\
-    \\event flags: --sec <hex|nsec>  -c <content>  -k <kind>  --ts <unix>
-    \\             -t <name[=value]> (repeatable)  -p <pubkey> (repeatable)
-    \\req/count flags: -k <kind>  -a <author>  -i <id>  -l <limit>  -t <name=value>
+    \\event flags: --sec <hex|nsec>  -c <content>  -k <kind>  --ts <unix>  --pow <bits>  --auth
+    \\             -t <name[=value]>  -p <pubkey>  -e <id>  -d <value> (all repeatable)  (no url = sign only)
+    \\req/count flags: -k <kind>  -a <author>  -i <id>  -l <limit>  -t <name=value>  -p/-e/-d <value>  -s <since>  -u <until>  --search <text>
     \\
     \\The secret for key/event can also be set via NOSTR_SECRET_KEY instead of --sec/<seckey>.
     \\
@@ -110,6 +110,8 @@ fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []con
     var content: []const u8 = "";
     var kind: i32 = 1;
     var ts: ?i64 = null;
+    var pow: ?u8 = null;
+    var do_auth = false;
     var url: ?[]const u8 = null;
     var tags: std.ArrayListUnmanaged([]const []const u8) = .empty;
 
@@ -138,12 +140,25 @@ fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []con
             i += 1;
             const pk = next(args, i) orelse return missing(out, "-p");
             try tags.append(arena, try arena.dupe([]const u8, &.{ "p", pk }));
+        } else if (std.mem.eql(u8, a, "-e")) {
+            i += 1;
+            const id = next(args, i) orelse return missing(out, "-e");
+            try tags.append(arena, try arena.dupe([]const u8, &.{ "e", id }));
+        } else if (std.mem.eql(u8, a, "-d")) {
+            i += 1;
+            const d = next(args, i) orelse return missing(out, "-d");
+            try tags.append(arena, try arena.dupe([]const u8, &.{ "d", d }));
+        } else if (std.mem.eql(u8, a, "--pow")) {
+            i += 1;
+            const v = next(args, i) orelse return missing(out, "--pow");
+            pow = std.fmt.parseInt(u8, v, 10) catch return invalid(out, "pow difficulty", v);
+        } else if (std.mem.eql(u8, a, "--auth")) {
+            do_auth = true;
         } else {
             url = a;
         }
     }
 
-    const relay_url = url orelse return missing(out, "relay url");
     const sec_str = sec orelse env_sec orelse return missing(out, "--sec");
 
     try nostr.init();
@@ -162,10 +177,20 @@ fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []con
     _ = builder.setContent(content);
     _ = builder.setCreatedAt(ts orelse nostr.io.timestamp());
     if (tags.items.len > 0) _ = builder.setTags(tags.items);
-    try builder.sign(&kp);
+    if (pow) |p| {
+        _ = builder.mine(&kp, p) catch return out.print("pow mining failed\n", .{});
+    } else {
+        try builder.sign(&kp);
+    }
 
     var ev_buf: [65536]u8 = undefined;
     const ev_json = try builder.serialize(&ev_buf);
+
+    // No relay URL: sign-only. Print the event (e.g. to build a NIP-98 header).
+    const relay_url = url orelse {
+        try out.print("{s}\n", .{ev_json});
+        return;
+    };
 
     var relay = try nostr.relay.Relay.init(arena, relay_url, .{ .read_timeout_ms = read_timeout_ms });
     defer relay.deinit();
@@ -174,17 +199,68 @@ fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []con
 
     var event = try nostr.Event.parse(ev_json);
     defer event.deinit();
-    try relay.publish(&event);
 
-    // Wait for the OK before exiting so the publish actually lands.
-    var tries: usize = 0;
-    while (tries < 100) : (tries += 1) {
-        var msg = (try relay.receive()) orelse break;
-        defer msg.deinit();
-        if (msg.msg_type == .ok) break;
-    }
+    const ok_success = publishWithAuth(&relay, &event, relay_url, &kp, do_auth);
 
     try out.print("{s}\n", .{ev_json});
+    std.debug.print("{s}\n", .{if (ok_success) "success" else "rejected"});
+}
+
+// Publish, handling NIP-42 when do_auth: an auth-required relay sends the
+// challenge proactively, while an open relay sends it only after a protected
+// event is rejected. Either way: authenticate when a challenge appears, then
+// re-publish once. Returns the relay's final OK success flag.
+fn publishWithAuth(relay: *nostr.relay.Relay, event: *const nostr.Event, url: []const u8, kp: *const nostr.Keypair, do_auth: bool) bool {
+    relay.publish(event) catch return false;
+
+    var authed = false;
+    var republished = false;
+    var tries: usize = 0;
+    while (tries < 200) : (tries += 1) {
+        var msg = (relay.receive() catch return false) orelse return false;
+        defer msg.deinit();
+        switch (msg.msg_type) {
+            .auth => {
+                if (do_auth and !authed) {
+                    if (msg.subscription_id) |challenge| {
+                        sendAuth(relay, url, kp, challenge) catch {};
+                        authed = true;
+                    }
+                }
+            },
+            .ok => {
+                if (msg.success) return true;
+                if (authed and !republished) {
+                    relay.publish(event) catch return false;
+                    republished = true;
+                } else {
+                    return false;
+                }
+            },
+            else => {},
+        }
+    }
+    return false;
+}
+
+// NIP-42: sign and send a kind-22242 auth event binding the challenge and URL.
+fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair, challenge: []const u8) !void {
+    var b = nostr.EventBuilder{};
+    _ = b.setKind(22242);
+    _ = b.setContent("");
+    _ = b.setCreatedAt(nostr.io.timestamp());
+    const auth_tags = [_][]const []const u8{
+        &.{ "relay", url },
+        &.{ "challenge", challenge },
+    };
+    _ = b.setTags(&auth_tags);
+    try b.sign(kp);
+
+    var buf: [4096]u8 = undefined;
+    const ev_json = try b.serialize(&buf);
+    var ev = try nostr.Event.parse(ev_json);
+    defer ev.deinit();
+    try relay.authenticate(&ev);
 }
 
 const Query = struct { url: []const u8, filter: nostr.Filter };
@@ -194,6 +270,9 @@ const Query = struct { url: []const u8, filter: nostr.Filter };
 fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Query {
     var url: ?[]const u8 = null;
     var limit: i32 = 0;
+    var since: i64 = 0;
+    var until: i64 = 0;
+    var search: ?[]const u8 = null;
     var kinds: std.ArrayListUnmanaged(i32) = .empty;
     var authors: std.ArrayListUnmanaged([32]u8) = .empty;
     var ids: std.ArrayListUnmanaged([32]u8) = .empty;
@@ -228,6 +307,29 @@ fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Q
             const v = next(args, i) orelse return missingNull(out, "-t");
             const tf = tagFilterFromSpec(arena, v) catch return invalidNull(out, "tag", v);
             try tag_filters.append(arena, tf);
+        } else if (std.mem.eql(u8, a, "-p")) {
+            i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-p");
+            try tag_filters.append(arena, try singleTagFilter(arena, 'p', v));
+        } else if (std.mem.eql(u8, a, "-e")) {
+            i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-e");
+            try tag_filters.append(arena, try singleTagFilter(arena, 'e', v));
+        } else if (std.mem.eql(u8, a, "-d")) {
+            i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-d");
+            try tag_filters.append(arena, try singleTagFilter(arena, 'd', v));
+        } else if (std.mem.eql(u8, a, "-s")) {
+            i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-s");
+            since = std.fmt.parseInt(i64, v, 10) catch return invalidNull(out, "since", v);
+        } else if (std.mem.eql(u8, a, "-u")) {
+            i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-u");
+            until = std.fmt.parseInt(i64, v, 10) catch return invalidNull(out, "until", v);
+        } else if (std.mem.eql(u8, a, "--search")) {
+            i += 1;
+            search = next(args, i) orelse return missingNull(out, "--search");
         } else {
             url = a;
         }
@@ -246,6 +348,9 @@ fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Q
             .authors_bytes = if (authors.items.len > 0) authors.items else null,
             .ids_bytes = if (ids.items.len > 0) ids.items else null,
             .limit_val = limit,
+            .since_val = since,
+            .until_val = until,
+            .search_str = search,
             .tag_filters = if (tag_filters.items.len > 0) tag_filters.items else null,
         },
     };
@@ -322,9 +427,14 @@ fn tagFilterFromSpec(arena: Allocator, spec: []const u8) !nostr.FilterTagEntry {
     const name = spec[0..eq];
     if (name.len != 1 or !std.ascii.isAlphabetic(name[0])) return error.InvalidTagFilter;
     const value = if (eq < spec.len) spec[eq + 1 ..] else "";
+    return singleTagFilter(arena, name[0], value);
+}
+
+// A #<letter> tag filter with a single string value (e.g. -p/-e/-d).
+fn singleTagFilter(arena: Allocator, letter: u8, value: []const u8) !nostr.FilterTagEntry {
     const values = try arena.alloc(nostr.TagValue, 1);
     values[0] = .{ .string = value };
-    return .{ .letter = name[0], .values = values };
+    return .{ .letter = letter, .values = values };
 }
 
 fn cmdRelay(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
