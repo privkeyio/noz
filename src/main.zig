@@ -15,6 +15,7 @@ const usage =
     \\  req <url> [filters..]        Subscribe, print matching events, exit at EOSE
     \\  count <url> [filters..]      Count matching events (NIP-45)
     \\  relay <url>                  Print the NIP-11 relay information document
+    \\  sync <src> <dst> [filters..] NIP-77 reconcile src's events into dst
     \\
     \\event flags: --sec <hex|nsec>  -c <content>  -k <kind>  --ts <unix>
     \\             -t <name[=value]> (repeatable)  -p <pubkey> (repeatable)
@@ -56,6 +57,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdCount(arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "relay")) {
         try cmdRelay(io, arena, out, rest);
+    } else if (std.mem.eql(u8, cmd, "sync")) {
+        try cmdSync(arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) {
         try out.writeAll(usage);
     } else {
@@ -366,6 +369,81 @@ fn isControlByte(c: u8) bool {
         '\n', '\t', '\r' => false,
         else => c < 0x20 or c == 0x7f,
     };
+}
+
+fn cmdSync(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+    var src: ?[]const u8 = null;
+    var dst: ?[]const u8 = null;
+    var limit: i32 = 0;
+    var kinds: std.ArrayListUnmanaged(i32) = .empty;
+    var authors: std.ArrayListUnmanaged([32]u8) = .empty;
+    var ids: std.ArrayListUnmanaged([32]u8) = .empty;
+    var tag_filters: std.ArrayListUnmanaged(nostr.FilterTagEntry) = .empty;
+
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "-k")) {
+            i += 1;
+            const v = next(args, i) orelse return missing(out, "-k");
+            const k = std.fmt.parseInt(i32, v, 10) catch return invalid(out, "kind", v);
+            try kinds.append(arena, k);
+        } else if (std.mem.eql(u8, a, "-l")) {
+            i += 1;
+            const v = next(args, i) orelse return missing(out, "-l");
+            limit = std.fmt.parseInt(i32, v, 10) catch return invalid(out, "limit", v);
+        } else if (std.mem.eql(u8, a, "-a")) {
+            i += 1;
+            const v = next(args, i) orelse return missing(out, "-a");
+            var b: [32]u8 = undefined;
+            nostr.hex.decode(v, &b) catch return invalid(out, "author", v);
+            try authors.append(arena, b);
+        } else if (std.mem.eql(u8, a, "-i")) {
+            i += 1;
+            const v = next(args, i) orelse return missing(out, "-i");
+            var b: [32]u8 = undefined;
+            nostr.hex.decode(v, &b) catch return invalid(out, "id", v);
+            try ids.append(arena, b);
+        } else if (std.mem.eql(u8, a, "-t")) {
+            i += 1;
+            const v = next(args, i) orelse return missing(out, "-t");
+            const tf = tagFilterFromSpec(arena, v) catch return invalid(out, "tag", v);
+            try tag_filters.append(arena, tf);
+        } else if (std.mem.startsWith(u8, a, "-")) {
+            return invalid(out, "flag", a);
+        } else if (src == null) {
+            src = a;
+        } else if (dst == null) {
+            dst = a;
+        } else {
+            return invalid(out, "argument", a);
+        }
+    }
+
+    const s = src orelse return missing(out, "source relay url");
+    const d = dst orelse return missing(out, "destination relay url");
+
+    const filter = nostr.Filter{
+        .allocator = arena,
+        .kinds_slice = if (kinds.items.len > 0) kinds.items else null,
+        .authors_bytes = if (authors.items.len > 0) authors.items else null,
+        .ids_bytes = if (ids.items.len > 0) ids.items else null,
+        .limit_val = limit,
+        .tag_filters = if (tag_filters.items.len > 0) tag_filters.items else null,
+    };
+
+    if (kinds.items.len == 0 and authors.items.len == 0 and ids.items.len == 0 and tag_filters.items.len == 0) {
+        try out.writeAll("syncing full relay (no filter)\n");
+    }
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    const n = nostr.sync.syncRelays(arena, s, d, &filter) catch |e| {
+        try out.print("sync failed: {s}\n", .{@errorName(e)});
+        return;
+    };
+    try out.print("synced {d} events\n", .{n});
 }
 
 fn next(args: []const [:0]const u8, i: usize) ?[]const u8 {
