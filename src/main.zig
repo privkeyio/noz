@@ -22,6 +22,9 @@ const usage =
     \\
 ;
 
+const read_timeout_ms = 10000;
+const max_req_events = 100000;
+
 pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
@@ -75,6 +78,7 @@ fn cmdKey(out: *Io.Writer, args: []const [:0]const u8) !void {
         try nostr.init();
         defer nostr.cleanup();
         var sk: [32]u8 = undefined;
+        defer std.crypto.secureZero(u8, &sk);
         decodeSecret(args[1], &sk) catch {
             try out.print("invalid secret key: {s}\n", .{args[1]});
             return;
@@ -109,10 +113,12 @@ fn cmdEvent(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
             content = next(args, i) orelse return missing(out, "-c");
         } else if (std.mem.eql(u8, a, "-k")) {
             i += 1;
-            kind = std.fmt.parseInt(i32, next(args, i) orelse return missing(out, "-k"), 10) catch 1;
+            const kv = next(args, i) orelse return missing(out, "-k");
+            kind = std.fmt.parseInt(i32, kv, 10) catch return out.print("invalid kind: {s}\n", .{kv});
         } else if (std.mem.eql(u8, a, "--ts")) {
             i += 1;
-            ts = std.fmt.parseInt(i64, next(args, i) orelse return missing(out, "--ts"), 10) catch null;
+            const tv = next(args, i) orelse return missing(out, "--ts");
+            ts = std.fmt.parseInt(i64, tv, 10) catch return out.print("invalid timestamp: {s}\n", .{tv});
         } else if (std.mem.eql(u8, a, "-t")) {
             i += 1;
             const spec = next(args, i) orelse return missing(out, "-t");
@@ -133,6 +139,7 @@ fn cmdEvent(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
     defer nostr.cleanup();
 
     var sk: [32]u8 = undefined;
+    defer std.crypto.secureZero(u8, &sk);
     decodeSecret(sec_str, &sk) catch return out.print("invalid secret key\n", .{});
     var pk: [32]u8 = undefined;
     try nostr.crypto.getPublicKey(&sk, &pk);
@@ -149,12 +156,13 @@ fn cmdEvent(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
     var ev_buf: [65536]u8 = undefined;
     const ev_json = try builder.serialize(&ev_buf);
 
-    var relay = try nostr.relay.Relay.init(arena, relay_url, .{});
+    var relay = try nostr.relay.Relay.init(arena, relay_url, .{ .read_timeout_ms = read_timeout_ms });
     defer relay.deinit();
     try relay.connect();
     defer relay.disconnect();
 
     var event = try nostr.Event.parse(ev_json);
+    defer event.deinit();
     try relay.publish(&event);
 
     // Wait for the OK before exiting so the publish actually lands.
@@ -185,24 +193,30 @@ fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Q
         const a = args[i];
         if (std.mem.eql(u8, a, "-k")) {
             i += 1;
-            try kinds.append(arena, std.fmt.parseInt(i32, next(args, i) orelse return null, 10) catch continue);
+            const v = next(args, i) orelse return missingNull(out, "-k");
+            const k = std.fmt.parseInt(i32, v, 10) catch return invalidNull(out, "kind", v);
+            try kinds.append(arena, k);
         } else if (std.mem.eql(u8, a, "-l")) {
             i += 1;
-            limit = std.fmt.parseInt(i32, next(args, i) orelse return null, 10) catch 0;
+            const v = next(args, i) orelse return missingNull(out, "-l");
+            limit = std.fmt.parseInt(i32, v, 10) catch return invalidNull(out, "limit", v);
         } else if (std.mem.eql(u8, a, "-a")) {
             i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-a");
             var b: [32]u8 = undefined;
-            nostr.hex.decode(next(args, i) orelse return null, &b) catch continue;
+            nostr.hex.decode(v, &b) catch return invalidNull(out, "author", v);
             try authors.append(arena, b);
         } else if (std.mem.eql(u8, a, "-i")) {
             i += 1;
+            const v = next(args, i) orelse return missingNull(out, "-i");
             var b: [32]u8 = undefined;
-            nostr.hex.decode(next(args, i) orelse return null, &b) catch continue;
+            nostr.hex.decode(v, &b) catch return invalidNull(out, "id", v);
             try ids.append(arena, b);
         } else if (std.mem.eql(u8, a, "-t")) {
             i += 1;
-            const spec = next(args, i) orelse return null;
-            try tag_filters.append(arena, try tagFilterFromSpec(arena, spec));
+            const v = next(args, i) orelse return missingNull(out, "-t");
+            const tf = tagFilterFromSpec(arena, v) catch return invalidNull(out, "tag", v);
+            try tag_filters.append(arena, tf);
         } else {
             url = a;
         }
@@ -232,21 +246,24 @@ fn cmdReq(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
     try nostr.init();
     defer nostr.cleanup();
 
-    var relay = try nostr.relay.Relay.init(arena, q.url, .{ .read_timeout_ms = 10000 });
+    var relay = try nostr.relay.Relay.init(arena, q.url, .{ .read_timeout_ms = read_timeout_ms });
     defer relay.deinit();
     try relay.connect();
     defer relay.disconnect();
 
     try relay.subscribe("noz", &.{q.filter});
 
-    while (true) {
+    var seen: usize = 0;
+    while (seen < max_req_events) {
         var msg = (try relay.receive()) orelse break;
         defer msg.deinit();
         switch (msg.msg_type) {
-            // Print the event object out of the owned raw message. msg.event's
-            // string fields point into the relay payload that receive() frees
-            // before returning, so they are not safe to read here.
-            .event => try printEventObject(out, msg.raw),
+            // Extract the event object straight from the raw message text so
+            // braces inside content cannot throw off the bounds.
+            .event => {
+                try printEventObject(out, msg.raw);
+                seen += 1;
+            },
             .eose, .closed => break,
             else => {},
         }
@@ -259,7 +276,7 @@ fn cmdCount(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
     try nostr.init();
     defer nostr.cleanup();
 
-    var relay = try nostr.relay.Relay.init(arena, q.url, .{ .read_timeout_ms = 10000 });
+    var relay = try nostr.relay.Relay.init(arena, q.url, .{ .read_timeout_ms = read_timeout_ms });
     defer relay.deinit();
     try relay.connect();
     defer relay.disconnect();
@@ -291,11 +308,12 @@ fn tagFromSpec(arena: Allocator, spec: []const u8) ![]const []const u8 {
 // "t=value" -> tag filter #t with ["value"]. A single-letter name is required.
 fn tagFilterFromSpec(arena: Allocator, spec: []const u8) !nostr.FilterTagEntry {
     const eq = std.mem.indexOfScalar(u8, spec, '=') orelse spec.len;
-    const letter: u8 = if (eq > 0) spec[0] else '#';
+    const name = spec[0..eq];
+    if (name.len != 1 or !std.ascii.isAlphabetic(name[0])) return error.InvalidTagFilter;
     const value = if (eq < spec.len) spec[eq + 1 ..] else "";
     const values = try arena.alloc(nostr.TagValue, 1);
     values[0] = .{ .string = value };
-    return .{ .letter = letter, .values = values };
+    return .{ .letter = name[0], .values = values };
 }
 
 fn cmdRelay(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
@@ -304,7 +322,7 @@ fn cmdRelay(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
         try out.print("failed to fetch relay info: {s}\n", .{@errorName(e)});
         return;
     };
-    try out.print("{s}\n", .{doc});
+    try printSanitized(out, doc);
 }
 
 // Extract and print the event object from a ["EVENT","sub",{...}] message. The
@@ -314,7 +332,32 @@ fn printEventObject(out: *Io.Writer, raw: []const u8) !void {
     const start = std.mem.indexOfScalar(u8, raw, '{') orelse return;
     const end = std.mem.lastIndexOfScalar(u8, raw, '}') orelse return;
     if (end < start) return;
-    try out.print("{s}\n", .{raw[start .. end + 1]});
+    try printSanitized(out, raw[start .. end + 1]);
+}
+
+// Print relay-supplied bytes followed by a newline. On a TTY, escape C0/C1
+// control characters (keeping normal whitespace) so a hostile relay cannot
+// inject terminal escape sequences.
+fn printSanitized(out: *Io.Writer, bytes: []const u8) !void {
+    if (std.posix.isatty(std.posix.STDOUT_FILENO)) {
+        for (bytes) |c| {
+            if (isControlByte(c)) {
+                try out.print("\\x{x:0>2}", .{c});
+            } else {
+                try out.writeByte(c);
+            }
+        }
+        try out.writeByte('\n');
+    } else {
+        try out.print("{s}\n", .{bytes});
+    }
+}
+
+fn isControlByte(c: u8) bool {
+    return switch (c) {
+        '\n', '\t', '\r' => false,
+        else => c < 0x20 or (c >= 0x7f and c <= 0x9f),
+    };
 }
 
 fn next(args: []const [:0]const u8, i: usize) ?[]const u8 {
@@ -326,6 +369,16 @@ fn missing(out: *Io.Writer, what: []const u8) !void {
     try out.print("missing required argument: {s}\n", .{what});
 }
 
+fn missingNull(out: *Io.Writer, what: []const u8) !?Query {
+    try missing(out, what);
+    return null;
+}
+
+fn invalidNull(out: *Io.Writer, what: []const u8, val: []const u8) !?Query {
+    try out.print("invalid {s}: {s}\n", .{ what, val });
+    return null;
+}
+
 // Accept a 64-char hex secret key or an nsec1 bech32 string.
 fn decodeSecret(input: []const u8, out: *[32]u8) !void {
     if (input.len == 64) {
@@ -333,6 +386,7 @@ fn decodeSecret(input: []const u8, out: *[32]u8) !void {
         return;
     }
     if (std.mem.startsWith(u8, input, "nsec1")) {
+        if (input.len > 200) return error.InvalidKey;
         var hrp: [8]u8 = undefined;
         var data: [40]u8 = undefined;
         const r = try nostr.bech32.decode(input, &hrp, &data);
