@@ -21,10 +21,10 @@ zig build -Doptimize=ReleaseFast
 ```
 noz key public <seckey>   Derive the hex public key from a hex/nsec secret key
 noz key generate          Generate a new keypair (hex sec + pub)
-noz event <url> ...        sign and publish an event        (in progress)
-noz req <url> ...          subscribe and print matching events (in progress)
-noz count <url> ...        count matching events            (in progress)
-noz relay <url>            print the NIP-11 relay info doc   (in progress)
+noz event <url> ...        sign and publish an event
+noz req <url> ...          subscribe and print matching events (to EOSE)
+noz count <url> ...        count matching events (NIP-45)
+noz relay <url>            print the NIP-11 relay info doc
 noz sync <src> <dst> ...   NIP-77 reconcile src into dst     (in progress)
 ```
 
