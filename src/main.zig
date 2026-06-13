@@ -20,6 +20,8 @@ const usage =
     \\             -t <name[=value]> (repeatable)  -p <pubkey> (repeatable)
     \\req/count flags: -k <kind>  -a <author>  -i <id>  -l <limit>  -t <name=value>
     \\
+    \\The secret for key/event can also be set via NOSTR_SECRET_KEY instead of --sec/<seckey>.
+    \\
 ;
 
 const read_timeout_ms = 10000;
@@ -42,11 +44,12 @@ pub fn main(init: std.process.Init) !void {
 
     const cmd = args[1];
     const rest = args[2..];
+    const env_sec = init.environ_map.get("NOSTR_SECRET_KEY");
 
     if (std.mem.eql(u8, cmd, "key")) {
-        try cmdKey(out, rest);
+        try cmdKey(env_sec, out, rest);
     } else if (std.mem.eql(u8, cmd, "event")) {
-        try cmdEvent(arena, out, rest);
+        try cmdEvent(env_sec, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "req")) {
         try cmdReq(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "count")) {
@@ -60,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     }
 }
 
-fn cmdKey(out: *Io.Writer, args: []const [:0]const u8) !void {
+fn cmdKey(env_sec: ?[]const u8, out: *Io.Writer, args: []const [:0]const u8) !void {
     if (args.len >= 1 and std.mem.eql(u8, args[0], "generate")) {
         try nostr.init();
         defer nostr.cleanup();
@@ -74,13 +77,18 @@ fn cmdKey(out: *Io.Writer, args: []const [:0]const u8) !void {
         return;
     }
 
-    if (args.len >= 2 and std.mem.eql(u8, args[0], "public")) {
+    if (args.len >= 1 and std.mem.eql(u8, args[0], "public")) {
+        const explicit: ?[]const u8 = if (args.len >= 2) args[1] else null;
+        const sec_str = explicit orelse env_sec orelse {
+            try out.writeAll("usage: noz key public <seckey> (or set NOSTR_SECRET_KEY)\n");
+            return;
+        };
         try nostr.init();
         defer nostr.cleanup();
         var sk: [32]u8 = undefined;
         defer std.crypto.secureZero(u8, &sk);
-        decodeSecret(args[1], &sk) catch {
-            try out.print("invalid secret key: {s}\n", .{args[1]});
+        decodeSecret(sec_str, &sk) catch {
+            try out.print("invalid secret key: {s}\n", .{sec_str});
             return;
         };
         var pk: [32]u8 = undefined;
@@ -94,7 +102,7 @@ fn cmdKey(out: *Io.Writer, args: []const [:0]const u8) !void {
     try out.writeAll("usage: noz key <public <seckey> | generate>\n");
 }
 
-fn cmdEvent(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
     var sec: ?[]const u8 = null;
     var content: []const u8 = "";
     var kind: i32 = 1;
@@ -133,7 +141,7 @@ fn cmdEvent(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void
     }
 
     const relay_url = url orelse return missing(out, "relay url");
-    const sec_str = sec orelse return missing(out, "--sec");
+    const sec_str = sec orelse env_sec orelse return missing(out, "--sec");
 
     try nostr.init();
     defer nostr.cleanup();
