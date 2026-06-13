@@ -432,6 +432,10 @@ fn cmdSync(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void 
         .tag_filters = if (tag_filters.items.len > 0) tag_filters.items else null,
     };
 
+    if (kinds.items.len == 0 and authors.items.len == 0 and ids.items.len == 0 and tag_filters.items.len == 0) {
+        try out.writeAll("syncing full relay (no filter)\n");
+    }
+
     try nostr.init();
     defer nostr.cleanup();
 
