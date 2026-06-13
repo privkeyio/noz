@@ -152,6 +152,7 @@ fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []con
             i += 1;
             const v = next(args, i) orelse return missing(out, "--pow");
             pow = std.fmt.parseInt(u8, v, 10) catch return invalid(out, "pow difficulty", v);
+            if (pow.? > 32) return invalid(out, "pow difficulty", v);
         } else if (std.mem.eql(u8, a, "--auth")) {
             do_auth = true;
         } else {
@@ -213,8 +214,12 @@ fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []con
 fn publishWithAuth(relay: *nostr.relay.Relay, event: *const nostr.Event, url: []const u8, kp: *const nostr.Keypair, do_auth: bool) bool {
     relay.publish(event) catch return false;
 
+    var id_hex: [65]u8 = undefined;
+    event.idHex(&id_hex);
+
     var authed = false;
     var republished = false;
+    var saw_reject = false;
     var tries: usize = 0;
     while (tries < 200) : (tries += 1) {
         var msg = (relay.receive() catch return false) orelse return false;
@@ -223,16 +228,36 @@ fn publishWithAuth(relay: *nostr.relay.Relay, event: *const nostr.Event, url: []
             .auth => {
                 if (do_auth and !authed) {
                     if (msg.subscription_id) |challenge| {
-                        sendAuth(relay, url, kp, challenge) catch {};
+                        // Only mark authed once the auth event is actually sent; a
+                        // protected publish cannot succeed without it.
+                        sendAuth(relay, url, kp, challenge) catch return false;
                         authed = true;
+                        // Open relay: the protected event was already rejected, so
+                        // nothing else will prompt a retry. Re-publish now.
+                        if (saw_reject and !republished) {
+                            relay.publish(event) catch return false;
+                            republished = true;
+                        }
                     }
                 }
             },
             .ok => {
+                // For OK, subscription_id holds the event id. Ignore OKs for other
+                // events (e.g. the relay's ack of our kind-22242 auth event).
+                if (msg.subscription_id) |ok_id| {
+                    if (!std.mem.eql(u8, ok_id, id_hex[0..64])) continue;
+                }
                 if (msg.success) return true;
+                saw_reject = true;
                 if (authed and !republished) {
+                    // Auth-required relay: the challenge came first, so this is the
+                    // unauthenticated publish being rejected. Retry now authed.
                     relay.publish(event) catch return false;
                     republished = true;
+                } else if (do_auth and !authed and authRequired(msg.message)) {
+                    // Open relay: an auth-required rejection is followed by an AUTH
+                    // challenge, so keep waiting for it instead of giving up.
+                    continue;
                 } else {
                     return false;
                 }
@@ -241,6 +266,13 @@ fn publishWithAuth(relay: *nostr.relay.Relay, event: *const nostr.Event, url: []
         }
     }
     return false;
+}
+
+// A NIP-42 rejection carries the "auth-required:" reason prefix; treat a missing
+// reason as auth-required too, since --auth signals the relay is expected to gate.
+fn authRequired(message: ?[]const u8) bool {
+    const m = message orelse return true;
+    return std.mem.startsWith(u8, m, "auth-required:");
 }
 
 // NIP-42: sign and send a kind-22242 auth event binding the challenge and URL.
