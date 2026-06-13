@@ -1,12 +1,12 @@
 .{
     .name = .noz,
-    .version = "0.0.0",
+    .version = "0.2.0",
     .fingerprint = 0xefbdd0725217fb6e,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .nostr = .{
-            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.4.tar.gz",
-            .hash = "nostr-0.3.4-JY6OcH66DwA7h9hyimyKIhCNQsL010avarOpuObjQfRe",
+            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.5.tar.gz",
+            .hash = "nostr-0.3.5-JY6OcKzDDwBHnc3_SJVIflzFJNzTqjxebWZsNB6u4BdW",
         },
     },
     .paths = .{
