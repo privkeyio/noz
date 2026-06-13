@@ -15,7 +15,6 @@ const usage =
     \\  req <url> [filters..]        Subscribe, print matching events, exit at EOSE
     \\  count <url> [filters..]      Count matching events (NIP-45)
     \\  relay <url>                  Print the NIP-11 relay information document
-    \\  sync <src> <dst> [..]        (todo) NIP-77 reconcile src into dst
     \\
     \\event flags: --sec <hex|nsec>  -c <content>  -k <kind>  --ts <unix>
     \\             -t <name[=value]> (repeatable)  -p <pubkey> (repeatable)

@@ -4,7 +4,7 @@
 [libnostr-z](https://github.com/privkeyio/libnostr-z).
 
 A focused tool for the things you actually script: signing and publishing
-events, querying relays, counting, reading relay info, and syncing.
+events, querying relays, counting, and reading relay info.
 
 ## Build
 
@@ -25,7 +25,6 @@ noz event <url> ...        sign and publish an event
 noz req <url> ...          subscribe and print matching events (to EOSE)
 noz count <url> ...        count matching events (NIP-45)
 noz relay <url>            print the NIP-11 relay info doc
-noz sync <src> <dst> ...   NIP-77 reconcile src into dst     (in progress)
 ```
 
 ## License
