@@ -1,0 +1,19 @@
+.{
+    .name = .noz,
+    .version = "0.0.0",
+    .fingerprint = 0xefbdd0725217fb6e,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .nostr = .{
+            .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.0.tar.gz",
+            .hash = "nostr-0.3.0-JY6OcJJ0DwDrcooJo6viPaiDg6ohNPie0wV10XykgQPE",
+        },
+    },
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "LICENSE",
+        "README.md",
+    },
+}
