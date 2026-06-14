@@ -6,7 +6,7 @@
     .dependencies = .{
         .nostr = .{
             .url = "https://github.com/privkeyio/libnostr-z/archive/refs/tags/v0.3.6.tar.gz",
-            .hash = "nostr-0.3.6-JY6OcEPJDwBtx9Hxe0gbI5L6h5cJ671F2Z-iHympeBky",
+            .hash = "nostr-0.3.6-JY6OcLPKDwAP8UJz5qRAVc4LKg3AB2zE7Eok-gky9o4d",
         },
     },
     .paths = .{
