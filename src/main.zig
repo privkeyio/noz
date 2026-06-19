@@ -16,6 +16,8 @@ const usage =
     \\  count <url> [filters..]      Count matching events (NIP-45)
     \\  relay <url>                  Print the NIP-11 relay information document
     \\  sync <src> <dst> [filters..] NIP-77 reconcile src's events into dst
+    \\  decode <bech32|hex>          Decode a NIP-19 entity (npub/nsec/note/nevent/naddr/nprofile)
+    \\  verify [event-json]          Verify an event's id and signature (reads stdin if no arg)
     \\
     \\event flags: --sec <hex|nsec>  -c <content>  -k <kind>  --ts <unix>  --pow <bits>  --auth
     \\             -t <name[=value]>  -p <pubkey>  -e <id>  -d <value> (all repeatable)  (no url = sign only)
@@ -59,6 +61,10 @@ pub fn main(init: std.process.Init) !void {
         try cmdRelay(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "sync")) {
         try cmdSync(arena, out, rest);
+    } else if (std.mem.eql(u8, cmd, "decode")) {
+        try cmdDecode(arena, out, rest);
+    } else if (std.mem.eql(u8, cmd, "verify")) {
+        try cmdVerify(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "help") or std.mem.eql(u8, cmd, "-h") or std.mem.eql(u8, cmd, "--help")) {
         try out.writeAll(usage);
     } else {
@@ -103,6 +109,110 @@ fn cmdKey(env_sec: ?[]const u8, out: *Io.Writer, args: []const [:0]const u8) !vo
     }
 
     try out.writeAll("usage: noz key <public <seckey> | generate>\n");
+}
+
+// Decode a NIP-19 bech32 entity (or bare hex pubkey) into its underlying fields.
+fn cmdDecode(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+    const input = if (args.len >= 1) args[0] else {
+        try out.writeAll("usage: noz decode <npub|nsec|note|nprofile|nevent|naddr|hex>\n");
+        return;
+    };
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var decoded = nostr.bech32.decodeNostr(arena, input) catch {
+        try out.print("invalid: cannot decode {s}\n", .{input});
+        out.flush() catch {};
+        std.process.exit(1);
+    };
+    defer decoded.deinit(arena);
+
+    switch (decoded) {
+        .pubkey => |pk| try hexField(out, "pubkey", &pk),
+        .seckey => |sk| try hexField(out, "seckey", &sk),
+        .event_id => |id| try hexField(out, "id", &id),
+        .profile => |p| {
+            try hexField(out, "pubkey", &p.pubkey);
+            for (p.relays) |r| try field(out, "relay", r);
+        },
+        .event => |e| {
+            try hexField(out, "id", &e.id);
+            if (e.author) |a| try hexField(out, "author", &a);
+            if (e.kind) |k| try out.print("{s:<8}{d}\n", .{ "kind", k });
+            for (e.relays) |r| try field(out, "relay", r);
+        },
+        .addr => |a| {
+            try out.print("{s:<8}{d}\n", .{ "kind", a.kind });
+            try hexField(out, "pubkey", &a.pubkey);
+            try field(out, "ident", a.identifier);
+            for (a.relays) |r| try field(out, "relay", r);
+        },
+        .offer => |o| {
+            try hexField(out, "pubkey", &o.pubkey);
+            try field(out, "relay", o.relay);
+            try field(out, "offer", o.offer_id);
+        },
+        .debit => |d| {
+            try hexField(out, "pubkey", &d.pubkey);
+            try field(out, "relay", d.relay);
+            if (d.pointer) |p| try field(out, "pointer", p);
+        },
+        .manage => |m| {
+            try hexField(out, "pubkey", &m.pubkey);
+            try field(out, "relay", m.relay);
+            if (m.pointer) |p| try field(out, "pointer", p);
+        },
+    }
+}
+
+fn field(out: *Io.Writer, label: []const u8, value: []const u8) !void {
+    try out.print("{s:<8}{s}\n", .{ label, value });
+}
+
+fn hexField(out: *Io.Writer, label: []const u8, bytes: *const [32]u8) !void {
+    var buf: [64]u8 = undefined;
+    nostr.hex.encode(bytes, &buf);
+    try field(out, label, &buf);
+}
+
+// Verify an event's id and Schnorr signature, read from an arg or stdin.
+// Exits non-zero on any validation failure.
+fn cmdVerify(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+    const raw = if (args.len >= 1) args[0] else blk: {
+        var in_buf: [4096]u8 = undefined;
+        var in_r = Io.File.stdin().reader(io, &in_buf);
+        break :blk in_r.interface.allocRemaining(arena, .limited(1 << 20)) catch {
+            try out.writeAll("usage: noz verify <event-json>  (or pipe the event on stdin)\n");
+            return;
+        };
+    };
+    const json = std.mem.trim(u8, raw, " \t\r\n");
+    if (json.len == 0) {
+        try out.writeAll("usage: noz verify <event-json>  (or pipe the event on stdin)\n");
+        return;
+    }
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var event = nostr.Event.parse(json) catch fail(out, "invalid: malformed event");
+    defer event.deinit();
+
+    event.validate() catch |e| fail(out, switch (e) {
+        error.IdMismatch => "invalid: id does not match content",
+        error.SigMismatch => "invalid: signature verification failed",
+        error.FutureEvent => "invalid: created_at is too far in the future",
+        else => "invalid: event failed validation",
+    });
+
+    try out.writeAll("valid\n");
+}
+
+fn fail(out: *Io.Writer, msg: []const u8) noreturn {
+    out.print("{s}\n", .{msg}) catch {};
+    out.flush() catch {};
+    std.process.exit(1);
 }
 
 fn cmdEvent(env_sec: ?[]const u8, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
