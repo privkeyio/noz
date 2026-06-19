@@ -38,3 +38,49 @@ jobs:
 
       - name: Test
         run: zig build test
+
+      - name: Offline integration tests
+        run: bash tests/integration_offline.sh ./zig-out/bin/noz
+
+  integration:
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.draft != true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y liblmdb-dev libsecp256k1-dev libssl-dev netcat-openbsd
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      - name: Build noz
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Build relay (wisp)
+        env:
+          WISP_VERSION: v0.5.3
+        run: |
+          git clone --depth 1 --branch "$WISP_VERSION" https://github.com/privkeyio/wisp "$RUNNER_TEMP/wisp"
+          (cd "$RUNNER_TEMP/wisp" && zig build -Doptimize=ReleaseFast)
+          echo "WISP=$RUNNER_TEMP/wisp/zig-out/bin/wisp" >> "$GITHUB_ENV"
+
+      - name: Start relays
+        run: |
+          start() { # port datadir
+            nohup env WISP_HOST=127.0.0.1 WISP_PORT="$1" WISP_STORAGE_PATH="$2" \
+              "$WISP" relay > "relay-$1.log" 2>&1 &
+            for i in $(seq 1 40); do nc -z 127.0.0.1 "$1" && return 0; sleep 0.5; done
+            echo "relay $1 did not start listening"; cat "relay-$1.log"; return 1
+          }
+          start 7777 "$RUNNER_TEMP/w1"
+          start 7778 "$RUNNER_TEMP/w2"
+
+      - name: Relay round-trip tests
+        run: NOZ=./zig-out/bin/noz bash tests/integration_relay.sh ws://127.0.0.1:7777
+
+      - name: NIP-77 sync tests
+        run: NOZ=./zig-out/bin/noz bash tests/integration_sync.sh ws://127.0.0.1:7777 ws://127.0.0.1:7778
