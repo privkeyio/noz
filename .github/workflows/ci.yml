@@ -38,3 +38,6 @@ jobs:
 
       - name: Test
         run: zig build test
+
+      - name: Offline integration tests
+        run: bash tests/integration_offline.sh ./zig-out/bin/noz
