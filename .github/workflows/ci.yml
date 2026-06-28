@@ -42,6 +42,9 @@ jobs:
       - name: Offline integration tests
         run: bash tests/integration_offline.sh ./zig-out/bin/noz
 
+      - name: Executable README
+        run: bash tests/integration_readme.sh ./zig-out/bin/noz
+
   integration:
     runs-on: ubuntu-latest
     if: github.event.pull_request.draft != true
