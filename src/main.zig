@@ -344,7 +344,7 @@ fn publishWithAuth(relay: *nostr.relay.Relay, event: *const nostr.Event, url: []
                     if (msg.subscription_id) |challenge| {
                         // Only mark authed once the auth event is actually sent; a
                         // protected publish cannot succeed without it.
-                        sendAuth(relay, url, kp, challenge) catch return false;
+                        _ = sendAuth(relay, url, kp, challenge) catch return false;
                         authed = true;
                         // Open relay: the protected event was already rejected, so
                         // nothing else will prompt a retry. Re-publish now.
@@ -390,7 +390,7 @@ fn authRequired(message: ?[]const u8) bool {
 }
 
 // NIP-42: sign and send a kind-22242 auth event binding the challenge and URL.
-fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair, challenge: []const u8) !void {
+fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair, challenge: []const u8) ![64]u8 {
     var b = nostr.EventBuilder{};
     _ = b.setKind(22242);
     _ = b.setContent("");
@@ -407,6 +407,9 @@ fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair
     var ev = try nostr.Event.parse(ev_json);
     defer ev.deinit();
     try relay.authenticate(&ev);
+    var id_hex: [65]u8 = undefined;
+    ev.idHex(&id_hex);
+    return id_hex[0..64].*;
 }
 
 const Query = struct { url: []const u8, filter: nostr.Filter };
@@ -576,34 +579,52 @@ fn cmdSend(env_sec: ?[]const u8, io: Io, arena: Allocator, out: *Io.Writer, args
 
     try relay.client.?.sendText(msg_json);
 
-    var authed = false;
+    // Once the auth event is out, replies to the first, unauthenticated send are
+    // dropped until the relay acks the auth event; the message is then re-sent
+    // and only replies to that copy are printed.
+    var auth_id: ?[64]u8 = null;
     var resent = false;
     var seen: usize = 0;
     while (seen < max_req_events) : (seen += 1) {
         var msg = (try relay.receive()) orelse break;
         defer msg.deinit();
+        const waiting = do_auth and !resent;
         switch (msg.msg_type) {
             .auth => {
-                if (do_auth and !authed) {
-                    if (msg.subscription_id) |challenge| {
-                        try sendAuth(&relay, relay_url, &kp, challenge);
-                        authed = true;
-                    }
+                if (do_auth and auth_id == null) {
+                    if (msg.subscription_id) |challenge| auth_id = try sendAuth(&relay, relay_url, &kp, challenge);
                 }
                 continue;
             },
-            .ok => if (authed and !resent) {
-                // The relay's ack of our auth event: now repeat the message.
-                try relay.client.?.sendText(msg_json);
-                resent = true;
-                continue;
+            .ok => if (auth_id) |aid| {
+                if (msg.subscription_id) |ok_id| {
+                    if (std.mem.eql(u8, ok_id, &aid)) {
+                        if (!msg.success) {
+                            try printSanitized(io, out, msg.raw);
+                            break;
+                        }
+                        if (!resent) {
+                            try relay.client.?.sendText(msg_json);
+                            resent = true;
+                        }
+                        continue;
+                    }
+                }
             },
-            .closed => if (do_auth and !resent and authRequired(msg.message)) continue,
             else => {},
+        }
+        if (waiting) {
+            if (auth_id != null) continue;
+            const auth_rejection = switch (msg.msg_type) {
+                .closed, .ok => authRequired(msg.message),
+                else => false,
+            };
+            if (auth_rejection) continue;
         }
         try printSanitized(io, out, msg.raw);
         switch (msg.msg_type) {
-            .eose, .closed, .count, .ok, .notice => break,
+            .eose, .closed, .count, .ok => break,
+            .notice => if (!waiting) break,
             else => {},
         }
     }

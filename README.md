@@ -32,7 +32,7 @@ noz decode <bech32|hex>      Decode a NIP-19 entity (npub/nsec/note/nevent/naddr
 noz verify [event-json]      Verify an event's id and signature (reads stdin if no arg)
 ```
 
-The secret for `key`/`event`/`send` can also come from `NOSTR_SECRET_KEY` instead of
+The secret for `key`/`event` (and `send --auth`) can also come from `NOSTR_SECRET_KEY` instead of
 `--sec`/`<seckey>`, so it never lands in your shell history.
 
 ## Examples
