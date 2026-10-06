@@ -16,6 +16,8 @@ const usage =
     \\  count <url> [filters..]      Count matching events (NIP-45)
     \\  relay <url>                  Print the NIP-11 relay information document
     \\  sync <src> <dst> [filters..] NIP-77 reconcile src's events into dst
+    \\  send <url> <json> [--sec <k> --auth]  Send one raw client message, print replies
+    \\                               until EOSE/CLOSED/COUNT/OK/NOTICE (--auth answers NIP-42)
     \\  decode <bech32|hex>          Decode a NIP-19 entity (npub/nsec/note/nevent/naddr/nprofile)
     \\  verify [event-json]          Verify an event's id and signature (reads stdin if no arg)
     \\
@@ -61,6 +63,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdRelay(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "sync")) {
         try cmdSync(arena, out, rest);
+    } else if (std.mem.eql(u8, cmd, "send")) {
+        try cmdSend(env_sec, io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "decode")) {
         try cmdDecode(arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "verify")) {
@@ -523,6 +527,83 @@ fn cmdReq(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8)
                 seen += 1;
             },
             .eose, .closed => break,
+            else => {},
+        }
+    }
+}
+
+// Sends one raw client message and prints every relay reply verbatim until the
+// reply that ends it (EOSE, CLOSED, COUNT, OK, or NOTICE). With --auth, a NIP-42
+// challenge is answered and the message re-sent once authenticated, and the
+// auth-required rejection that preceded it is not printed.
+fn cmdSend(env_sec: ?[]const u8, io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+    var url: ?[]const u8 = null;
+    var json: ?[]const u8 = null;
+    var sec: ?[]const u8 = env_sec;
+    var do_auth = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--sec")) {
+            i += 1;
+            sec = next(args, i) orelse return missing(out, "--sec value");
+        } else if (std.mem.eql(u8, a, "--auth")) {
+            do_auth = true;
+        } else if (url == null) {
+            url = a;
+        } else if (json == null) {
+            json = a;
+        } else return invalid(out, "argument", a);
+    }
+    const relay_url = url orelse return missing(out, "relay url");
+    const msg_json = json orelse return missing(out, "message json");
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var kp = nostr.Keypair{ .secret_key = undefined, .public_key = undefined };
+    defer kp.deinit();
+    if (do_auth) {
+        const sec_str = sec orelse return missing(out, "--sec (required with --auth)");
+        decodeSecret(sec_str, &kp.secret_key) catch return out.print("invalid secret key\n", .{});
+        try nostr.crypto.getPublicKey(&kp.secret_key, &kp.public_key);
+    }
+
+    var relay = try nostr.relay.Relay.init(arena, relay_url, .{ .read_timeout_ms = read_timeout_ms });
+    defer relay.deinit();
+    try relay.connect();
+    defer relay.disconnect();
+
+    try relay.client.?.sendText(msg_json);
+
+    var authed = false;
+    var resent = false;
+    var seen: usize = 0;
+    while (seen < max_req_events) : (seen += 1) {
+        var msg = (try relay.receive()) orelse break;
+        defer msg.deinit();
+        switch (msg.msg_type) {
+            .auth => {
+                if (do_auth and !authed) {
+                    if (msg.subscription_id) |challenge| {
+                        try sendAuth(&relay, relay_url, &kp, challenge);
+                        authed = true;
+                    }
+                }
+                continue;
+            },
+            .ok => if (authed and !resent) {
+                // The relay's ack of our auth event: now repeat the message.
+                try relay.client.?.sendText(msg_json);
+                resent = true;
+                continue;
+            },
+            .closed => if (do_auth and !resent and authRequired(msg.message)) continue,
+            else => {},
+        }
+        try printSanitized(io, out, msg.raw);
+        switch (msg.msg_type) {
+            .eose, .closed, .count, .ok, .notice => break,
             else => {},
         }
     }

@@ -27,11 +27,12 @@ noz req <url> [filters..]    Subscribe and print matching events (to EOSE)
 noz count <url> [filters..]  Count matching events (NIP-45)
 noz relay <url>              Print the NIP-11 relay info doc
 noz sync <src> <dst> [..]    NIP-77 reconcile src's events into dst
+noz send <url> <json>        Send one raw client message, print replies (--sec <k> --auth for NIP-42)
 noz decode <bech32|hex>      Decode a NIP-19 entity (npub/nsec/note/nevent/naddr/nprofile)
 noz verify [event-json]      Verify an event's id and signature (reads stdin if no arg)
 ```
 
-The secret for `key`/`event` can also come from `NOSTR_SECRET_KEY` instead of
+The secret for `key`/`event`/`send` can also come from `NOSTR_SECRET_KEY` instead of
 `--sec`/`<seckey>`, so it never lands in your shell history.
 
 ## Examples

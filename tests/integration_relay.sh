@@ -47,6 +47,12 @@ chk "REQ until in the past is empty" 0 "$(req -t t=$TAG -u 1)"
 # --- NIP-45 COUNT (noz prints the bare count) ---
 chk "COUNT returns the event count" 1 "$(timeout 10 $NOZ count -t t=$TAG "$R" 2>/dev/null)"
 
+# --- send: a raw client message, replies printed until the terminating one ---
+SENT=$(timeout 10 $NOZ send "$R" "[\"REQ\",\"raw\",{\"ids\":[\"$ID\"]},{\"ids\":[\"$ID\"]}]" 2>/dev/null)
+chk "send prints the matching EVENT" 1 "$(echo "$SENT" | grep -c "^\[\"EVENT\",\"raw\"")"
+chk "send stops at EOSE" '["EOSE","raw"]' "$(echo "$SENT" | tail -1)"
+chk "send prints a COUNT reply" 1 "$(timeout 10 $NOZ send "$R" "[\"COUNT\",\"c\",{\"ids\":[\"$ID\"]}]" 2>/dev/null | grep -c '"count":1')"
+
 # --- A fetched event survives verify end to end ---
 EV=$(timeout 10 $NOZ req -i "$ID" "$R" 2>/dev/null | head -1)
 chk "fetched event passes verify" valid "$(echo "$EV" | $NOZ verify)"
