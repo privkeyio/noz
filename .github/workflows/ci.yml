@@ -10,9 +10,8 @@ jobs:
   build:
     strategy:
       matrix:
-        include:
-          - os: ubuntu-latest
-          - os: macos-latest
+        os: [ubuntu-latest, macos-latest]
+        zig: [0.16.0, 0.17.0]
 
     runs-on: ${{ matrix.os }}
     if: github.event.pull_request.draft != true
@@ -31,7 +30,7 @@ jobs:
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.16.0
+          version: ${{ matrix.zig }}
 
       - name: Build
         run: zig build
@@ -65,7 +64,7 @@ jobs:
 
       - name: Build relay (wisp)
         env:
-          WISP_VERSION: v0.5.3
+          WISP_VERSION: v0.7.0
         run: |
           git clone --depth 1 --branch "$WISP_VERSION" https://github.com/privkeyio/wisp "$RUNNER_TEMP/wisp"
           (cd "$RUNNER_TEMP/wisp" && zig build -Doptimize=ReleaseFast)
