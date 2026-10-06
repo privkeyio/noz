@@ -53,6 +53,8 @@ chk "send prints the matching EVENT" 1 "$(echo "$SENT" | grep -c "^\[\"EVENT\",\
 chk "send stops at EOSE" '["EOSE","raw"]' "$(echo "$SENT" | tail -1)"
 chk "send prints a COUNT reply" 1 "$(timeout 10 $NOZ send "$R" "[\"COUNT\",\"c\",{\"ids\":[\"$ID\"]}]" 2>/dev/null | grep -c '"count":1')"
 
+chk "send ends at a NIP-77 reply" 1 "$(timeout 10 $NOZ send "$R" '["NEG-OPEN","n",{},"6100"]' 2>/dev/null | grep -cE '^\["NEG-(MSG|ERR)","n"')"
+
 # --- A fetched event survives verify end to end ---
 EV=$(timeout 10 $NOZ req -i "$ID" "$R" 2>/dev/null | head -1)
 chk "fetched event passes verify" valid "$(echo "$EV" | $NOZ verify)"

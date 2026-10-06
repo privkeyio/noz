@@ -17,7 +17,7 @@ const usage =
     \\  relay <url>                  Print the NIP-11 relay information document
     \\  sync <src> <dst> [filters..] NIP-77 reconcile src's events into dst
     \\  send <url> <json> [--sec <k> --auth]  Send one raw client message, print replies
-    \\                               until EOSE/CLOSED/COUNT/OK/NOTICE (--auth answers NIP-42)
+    \\                               until EOSE/CLOSED/COUNT/OK/NOTICE/NEG-MSG/NEG-ERR (--auth answers NIP-42)
     \\  decode <bech32|hex>          Decode a NIP-19 entity (npub/nsec/note/nevent/naddr/nprofile)
     \\  verify [event-json]          Verify an event's id and signature (reads stdin if no arg)
     \\
@@ -536,9 +536,10 @@ fn cmdReq(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8)
 }
 
 // Sends one raw client message and prints every relay reply verbatim until the
-// reply that ends it (EOSE, CLOSED, COUNT, OK, or NOTICE). With --auth, a NIP-42
-// challenge is answered and the message re-sent once authenticated, and the
-// auth-required rejection that preceded it is not printed.
+// reply that ends it (EOSE, CLOSED, COUNT, OK, NOTICE, NEG-MSG or NEG-ERR).
+// With --auth, a NIP-42 challenge is answered and the message re-sent once
+// authenticated, and the auth-required rejection that preceded it is not
+// printed.
 fn cmdSend(env_sec: ?[]const u8, io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
     var url: ?[]const u8 = null;
     var json: ?[]const u8 = null;
@@ -622,9 +623,12 @@ fn cmdSend(env_sec: ?[]const u8, io: Io, arena: Allocator, out: *Io.Writer, args
             if (auth_rejection) continue;
         }
         try printSanitized(io, out, msg.raw);
+        try out.flush();
         switch (msg.msg_type) {
             .eose, .closed, .count, .ok => break,
             .notice => if (!waiting) break,
+            // NIP-77 replies, which the relay client does not classify.
+            .unknown => if (std.mem.startsWith(u8, msg.raw, "[\"NEG-MSG\"") or std.mem.startsWith(u8, msg.raw, "[\"NEG-ERR\"")) break,
             else => {},
         }
     }
