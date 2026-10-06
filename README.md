@@ -9,7 +9,7 @@ NIP-19 entities, and verifying events.
 
 ## Build
 
-Requires Zig 0.16 and `libssl`/`libsecp256k1` (pulled in transitively by
+Requires Zig 0.16 or 0.17 and `libssl`/`libsecp256k1` (pulled in transitively by
 libnostr-z).
 
 ```sh

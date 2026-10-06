@@ -418,7 +418,7 @@ const Query = struct { url: []const u8, filter: nostr.Filter };
 // positional relay URL. Returns null (after printing) if the URL is missing.
 fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Query {
     var url: ?[]const u8 = null;
-    var limit: i32 = 0;
+    var limit: ?u32 = null;
     var since: i64 = 0;
     var until: i64 = 0;
     var search: ?[]const u8 = null;
@@ -438,7 +438,7 @@ fn parseQuery(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !?Q
         } else if (std.mem.eql(u8, a, "-l")) {
             i += 1;
             const v = next(args, i) orelse return missingNull(out, "-l");
-            limit = std.fmt.parseInt(i32, v, 10) catch return invalidNull(out, "limit", v);
+            limit = std.fmt.parseInt(u32, v, 10) catch return invalidNull(out, "limit", v);
         } else if (std.mem.eql(u8, a, "-a")) {
             i += 1;
             const v = next(args, i) orelse return missingNull(out, "-a");
@@ -732,7 +732,7 @@ fn isControlByte(c: u8) bool {
 fn cmdSync(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
     var src: ?[]const u8 = null;
     var dst: ?[]const u8 = null;
-    var limit: i32 = 0;
+    var limit: ?u32 = null;
     var kinds: std.ArrayListUnmanaged(i32) = .empty;
     var authors: std.ArrayListUnmanaged([32]u8) = .empty;
     var ids: std.ArrayListUnmanaged([32]u8) = .empty;
@@ -749,7 +749,7 @@ fn cmdSync(arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void 
         } else if (std.mem.eql(u8, a, "-l")) {
             i += 1;
             const v = next(args, i) orelse return missing(out, "-l");
-            limit = std.fmt.parseInt(i32, v, 10) catch return invalid(out, "limit", v);
+            limit = std.fmt.parseInt(u32, v, 10) catch return invalid(out, "limit", v);
         } else if (std.mem.eql(u8, a, "-a")) {
             i += 1;
             const v = next(args, i) orelse return missing(out, "-a");
