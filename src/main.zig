@@ -16,6 +16,8 @@ const usage =
     \\  count <url> [filters..]      Count matching events (NIP-45)
     \\  relay <url>                  Print the NIP-11 relay information document
     \\  sync <src> <dst> [filters..] NIP-77 reconcile src's events into dst
+    \\  send <url> <json> [--sec <k> --auth]  Send one raw client message, print replies
+    \\                               until EOSE/CLOSED/COUNT/OK/NOTICE (--auth answers NIP-42)
     \\  decode <bech32|hex>          Decode a NIP-19 entity (npub/nsec/note/nevent/naddr/nprofile)
     \\  verify [event-json]          Verify an event's id and signature (reads stdin if no arg)
     \\
@@ -61,6 +63,8 @@ pub fn main(init: std.process.Init) !void {
         try cmdRelay(io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "sync")) {
         try cmdSync(arena, out, rest);
+    } else if (std.mem.eql(u8, cmd, "send")) {
+        try cmdSend(env_sec, io, arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "decode")) {
         try cmdDecode(arena, out, rest);
     } else if (std.mem.eql(u8, cmd, "verify")) {
@@ -340,7 +344,7 @@ fn publishWithAuth(relay: *nostr.relay.Relay, event: *const nostr.Event, url: []
                     if (msg.subscription_id) |challenge| {
                         // Only mark authed once the auth event is actually sent; a
                         // protected publish cannot succeed without it.
-                        sendAuth(relay, url, kp, challenge) catch return false;
+                        _ = sendAuth(relay, url, kp, challenge) catch return false;
                         authed = true;
                         // Open relay: the protected event was already rejected, so
                         // nothing else will prompt a retry. Re-publish now.
@@ -386,7 +390,7 @@ fn authRequired(message: ?[]const u8) bool {
 }
 
 // NIP-42: sign and send a kind-22242 auth event binding the challenge and URL.
-fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair, challenge: []const u8) !void {
+fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair, challenge: []const u8) ![64]u8 {
     var b = nostr.EventBuilder{};
     _ = b.setKind(22242);
     _ = b.setContent("");
@@ -403,6 +407,9 @@ fn sendAuth(relay: *nostr.relay.Relay, url: []const u8, kp: *const nostr.Keypair
     var ev = try nostr.Event.parse(ev_json);
     defer ev.deinit();
     try relay.authenticate(&ev);
+    var id_hex: [65]u8 = undefined;
+    ev.idHex(&id_hex);
+    return id_hex[0..64].*;
 }
 
 const Query = struct { url: []const u8, filter: nostr.Filter };
@@ -523,6 +530,101 @@ fn cmdReq(io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8)
                 seen += 1;
             },
             .eose, .closed => break,
+            else => {},
+        }
+    }
+}
+
+// Sends one raw client message and prints every relay reply verbatim until the
+// reply that ends it (EOSE, CLOSED, COUNT, OK, or NOTICE). With --auth, a NIP-42
+// challenge is answered and the message re-sent once authenticated, and the
+// auth-required rejection that preceded it is not printed.
+fn cmdSend(env_sec: ?[]const u8, io: Io, arena: Allocator, out: *Io.Writer, args: []const [:0]const u8) !void {
+    var url: ?[]const u8 = null;
+    var json: ?[]const u8 = null;
+    var sec: ?[]const u8 = env_sec;
+    var do_auth = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const a = args[i];
+        if (std.mem.eql(u8, a, "--sec")) {
+            i += 1;
+            sec = next(args, i) orelse return missing(out, "--sec value");
+        } else if (std.mem.eql(u8, a, "--auth")) {
+            do_auth = true;
+        } else if (url == null) {
+            url = a;
+        } else if (json == null) {
+            json = a;
+        } else return invalid(out, "argument", a);
+    }
+    const relay_url = url orelse return missing(out, "relay url");
+    const msg_json = json orelse return missing(out, "message json");
+
+    try nostr.init();
+    defer nostr.cleanup();
+
+    var kp = nostr.Keypair{ .secret_key = undefined, .public_key = undefined };
+    defer kp.deinit();
+    if (do_auth) {
+        const sec_str = sec orelse return missing(out, "--sec (required with --auth)");
+        decodeSecret(sec_str, &kp.secret_key) catch return out.print("invalid secret key\n", .{});
+        try nostr.crypto.getPublicKey(&kp.secret_key, &kp.public_key);
+    }
+
+    var relay = try nostr.relay.Relay.init(arena, relay_url, .{ .read_timeout_ms = read_timeout_ms });
+    defer relay.deinit();
+    try relay.connect();
+    defer relay.disconnect();
+
+    try relay.client.?.sendText(msg_json);
+
+    // Once the auth event is out, replies to the first, unauthenticated send are
+    // dropped until the relay acks the auth event; the message is then re-sent
+    // and only replies to that copy are printed.
+    var auth_id: ?[64]u8 = null;
+    var resent = false;
+    var seen: usize = 0;
+    while (seen < max_req_events) : (seen += 1) {
+        var msg = (try relay.receive()) orelse break;
+        defer msg.deinit();
+        const waiting = do_auth and !resent;
+        switch (msg.msg_type) {
+            .auth => {
+                if (do_auth and auth_id == null) {
+                    if (msg.subscription_id) |challenge| auth_id = try sendAuth(&relay, relay_url, &kp, challenge);
+                }
+                continue;
+            },
+            .ok => if (auth_id) |aid| {
+                if (msg.subscription_id) |ok_id| {
+                    if (std.mem.eql(u8, ok_id, &aid)) {
+                        if (!msg.success) {
+                            try printSanitized(io, out, msg.raw);
+                            break;
+                        }
+                        if (!resent) {
+                            try relay.client.?.sendText(msg_json);
+                            resent = true;
+                        }
+                        continue;
+                    }
+                }
+            },
+            else => {},
+        }
+        if (waiting) {
+            if (auth_id != null) continue;
+            const auth_rejection = switch (msg.msg_type) {
+                .closed, .ok => authRequired(msg.message),
+                else => false,
+            };
+            if (auth_rejection) continue;
+        }
+        try printSanitized(io, out, msg.raw);
+        switch (msg.msg_type) {
+            .eose, .closed, .count, .ok => break,
+            .notice => if (!waiting) break,
             else => {},
         }
     }
